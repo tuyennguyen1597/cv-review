@@ -19,12 +19,17 @@ import { createClient } from "@supabase/supabase-js";
 import { formatDocumentsAsString } from "langchain/util/document";
 import { NextResponse } from "next/server";
 import { generateObject } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAI, openai } from "@ai-sdk/openai";
 import { getSystemParsedCvSectionsPrompt } from "@/utils/prompts/system-parsed-cv-sections";
 import { CvSection, cvSectionSchema } from "@/schema/cv-section";
 import { SelfQueryRetriever } from "langchain/retrievers/self_query";
-
+import { buildAnalyzeCvPrompts } from "@/utils/builders/build-prompts";
 export const runtime = "nodejs";
+
+const MAX_CONTEXT_CHARS = 2000;
+const RETRIEVER_K = 3;
+const MODEL_CHAT = "gpt-4o-mini";
+const EMBEDDING_MODEL = "text-embedding-3-small";
 
 export async function POST(req: Request) {
   const formData = await req.formData();
@@ -40,8 +45,12 @@ export async function POST(req: Request) {
   const pdfData = await pdfParse(fileBuffer);
   const cvContent = pdfData.text;
 
+  // PARSE THE CV INTO SECTIONS
+  console.log("Parsing CV into sections...");
   const CvSections = await parseCvToSections(cvContent);
 
+  // CREATE THE SUPABASE CLIENT
+  console.log("Creating Supabase client...");
   const supabaseClient = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -49,10 +58,10 @@ export async function POST(req: Request) {
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const embeddings = new OpenAIEmbeddings({
     openAIApiKey: process.env.OPENAI_API_KEY,
-    model: "text-embedding-3-small",
+    model: EMBEDDING_MODEL,
   });
   const model = new ChatOpenAI({
-    model: "gpt-4o-mini",
+    model: MODEL_CHAT,
     apiKey: process.env.OPENAI_API_KEY,
   });
 
@@ -69,6 +78,8 @@ export async function POST(req: Request) {
     structuredQueryTranslator: new SupabaseTranslator(),
   });
 
+  // ANALYZE EACH SECTION OF THE CV
+  console.log("Analyzing each section of the CV...");
   const aggregatedAnalysis: Record<string, SectionAnalysis> = {};
   const sectionEntries = Object.entries(CvSections).filter(
     ([, content]) => content.length >= 50
@@ -77,27 +88,24 @@ export async function POST(req: Request) {
     const docs = await retriever.invoke(content);
     const fullContext = formatDocumentsAsString(docs);
     const contextString =
-      fullContext.length > 2000 ? fullContext.slice(0, 2000) : fullContext;
-    const systemPrompt = getSystemAnalyzeCvPrompt().replace(
-      "{context}",
-      contextString
-    );
-    const userPrompt = getUserAnalyzeCvPrompt()
-      .replace("{input}", content)
-      .replace("{job_description}", jobDescription)
-      .replace("{section_name}", section);
-    const { object: analysis } = await generateObject({
-      model: openai("gpt-4o-mini"),
-      system: systemPrompt,
-      prompt: userPrompt,
-      schema: sectionAnalysisSchema,
+      fullContext.length > MAX_CONTEXT_CHARS
+        ? fullContext.slice(0, MAX_CONTEXT_CHARS)
+        : fullContext;
+
+    const analysis = await analyzeSectionCv({
+      contextString,
+      input: content,
+      jobDescription,
+      section,
     });
     aggregatedAnalysis[section] = analysis;
   });
   await Promise.all(tasks);
 
+  // CALCULATE THE FINAL SCORE
+  console.log("Calculating the final score...");
   const { object: finalScore } = await generateObject({
-    model: openai("gpt-4o-mini"),
+    model: openai(MODEL_CHAT),
     prompt: getSystemFinalScorePrompt(aggregatedAnalysis),
     schema: analysisSchema.pick({ overallFeedback: true, score: true }),
   });
@@ -123,6 +131,27 @@ const parseCvToSections = async (cvContent: string): Promise<CvSection> => {
   });
 
   return cvSections;
+};
+
+const analyzeSectionCv = async (params: {
+  contextString: string;
+  input: string;
+  jobDescription: string;
+  section: string;
+}) => {
+  const { systemPrompt, userPrompt } = buildAnalyzeCvPrompts({
+    context: params.contextString,
+    input: params.input,
+    jobDescription: params.jobDescription,
+    section: params.section,
+  });
+  const { object: analysis } = await generateObject({
+    model: openai(MODEL_CHAT),
+    system: systemPrompt,
+    prompt: userPrompt,
+    schema: sectionAnalysisSchema,
+  });
+  return analysis;
 };
 
 const metadataInfo = [
