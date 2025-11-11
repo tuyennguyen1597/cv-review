@@ -70,11 +70,14 @@ export async function POST(req: Request) {
   });
 
   const aggregatedAnalysis: Record<string, SectionAnalysis> = {};
-  for (const [section, content] of Object.entries(CvSections)) {
-    if (content.length < 50) continue;
-
+  const sectionEntries = Object.entries(CvSections).filter(
+    ([, content]) => content.length >= 50
+  );
+  const tasks = sectionEntries.map(async ([section, content]) => {
     const docs = await retriever.invoke(content);
-    const contextString = formatDocumentsAsString(docs);
+    const fullContext = formatDocumentsAsString(docs);
+    const contextString =
+      fullContext.length > 2000 ? fullContext.slice(0, 2000) : fullContext;
     const systemPrompt = getSystemAnalyzeCvPrompt().replace(
       "{context}",
       contextString
@@ -83,7 +86,6 @@ export async function POST(req: Request) {
       .replace("{input}", content)
       .replace("{job_description}", jobDescription)
       .replace("{section_name}", section);
-
     const { object: analysis } = await generateObject({
       model: openai("gpt-4o-mini"),
       system: systemPrompt,
@@ -91,7 +93,8 @@ export async function POST(req: Request) {
       schema: sectionAnalysisSchema,
     });
     aggregatedAnalysis[section] = analysis;
-  }
+  });
+  await Promise.all(tasks);
 
   const { object: finalScore } = await generateObject({
     model: openai("gpt-4o-mini"),
