@@ -1,13 +1,28 @@
-import { analysisSchema } from "@/schema/analyze-cv";
-import { getSystemAnalyzeCvPrompt } from "@/utils/prompts/system-analyze-cv-prompt";
-import { getUserAnalyzeCvPrompt } from "@/utils/prompts/user-analyze-cv-prompt";
+import {
+  analysisSchema,
+  CVAnalysisResponse,
+  SectionAnalysis,
+  sectionAnalysisSchema,
+} from "@/schema/analyze-cv";
+import {
+  getSystemAnalyzeCvPrompt,
+  getSystemFinalScorePrompt,
+} from "@/utils/prompts/system-analyze-cv-prompt";
+import {
+  getUserAnalyzeCvPrompt,
+  getUserParseCvPrompt,
+} from "@/utils/prompts/user-analyze-cv-prompt";
 import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
-import { OpenAIEmbeddings } from "@langchain/openai";
+import { SupabaseTranslator } from "@langchain/community/structured_query/supabase";
+import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { createClient } from "@supabase/supabase-js";
 import { formatDocumentsAsString } from "langchain/util/document";
 import { NextResponse } from "next/server";
 import { generateObject } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
+import { getSystemParsedCvSectionsPrompt } from "@/utils/prompts/system-parsed-cv-sections";
+import { CvSection, cvSectionSchema } from "@/schema/cv-section";
+import { SelfQueryRetriever } from "langchain/retrievers/self_query";
 
 export const runtime = "nodejs";
 
@@ -25,13 +40,20 @@ export async function POST(req: Request) {
   const pdfData = await pdfParse(fileBuffer);
   const cvContent = pdfData.text;
 
+  const CvSections = await parseCvToSections(cvContent);
+
   const supabaseClient = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   );
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const embeddings = new OpenAIEmbeddings({
     openAIApiKey: process.env.OPENAI_API_KEY,
     model: "text-embedding-3-small",
+  });
+  const model = new ChatOpenAI({
+    model: "gpt-4o-mini",
+    apiKey: process.env.OPENAI_API_KEY,
   });
 
   const vectorStore = new SupabaseVectorStore(embeddings, {
@@ -39,26 +61,71 @@ export async function POST(req: Request) {
     tableName: "documents",
     queryName: "match_documents",
   });
-  const retriever = vectorStore.asRetriever();
-
-  const docs = await retriever.invoke(cvContent);
-  console.log("docs", docs);
-  const contextString = formatDocumentsAsString(docs);
-  console.log("contextString", contextString);
-  // Build prompts
-  const system = getSystemAnalyzeCvPrompt().replace("{context}", contextString);
-  const user = getUserAnalyzeCvPrompt()
-    .replace("{input}", cvContent)
-    .replace("{job_description}", jobDescription);
-
-  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const { object: analysis } = await generateObject({
-    model: openai("gpt-4o-mini"),
-    system,
-    prompt: user,
-    schema: analysisSchema,
+  const retriever = SelfQueryRetriever.fromLLM({
+    llm: model,
+    vectorStore,
+    documentContents: "Best practices for writing a CV section",
+    attributeInfo: metadataInfo,
+    structuredQueryTranslator: new SupabaseTranslator(),
   });
 
-  console.log("result", analysis);
-  return NextResponse.json({ analysis }, { status: 200 });
+  const aggregatedAnalysis: Record<string, SectionAnalysis> = {};
+  for (const [section, content] of Object.entries(CvSections)) {
+    if (content.length < 50) continue;
+
+    const docs = await retriever.invoke(content);
+    const contextString = formatDocumentsAsString(docs);
+    const systemPrompt = getSystemAnalyzeCvPrompt().replace(
+      "{context}",
+      contextString
+    );
+    const userPrompt = getUserAnalyzeCvPrompt()
+      .replace("{input}", content)
+      .replace("{job_description}", jobDescription)
+      .replace("{section_name}", section);
+
+    const { object: analysis } = await generateObject({
+      model: openai("gpt-4o-mini"),
+      system: systemPrompt,
+      prompt: userPrompt,
+      schema: sectionAnalysisSchema,
+    });
+    aggregatedAnalysis[section] = analysis;
+  }
+
+  const { object: finalScore } = await generateObject({
+    model: openai("gpt-4o-mini"),
+    prompt: getSystemFinalScorePrompt(aggregatedAnalysis),
+    schema: analysisSchema.pick({ overallFeedback: true, score: true }),
+  });
+
+  const finalResponse: CVAnalysisResponse = {
+    ...finalScore,
+    sectionAnalysis: aggregatedAnalysis,
+  };
+
+  return NextResponse.json({ analysis: finalResponse }, { status: 200 });
 }
+
+const parseCvToSections = async (cvContent: string): Promise<CvSection> => {
+  const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  const userPrompt = getUserParseCvPrompt().replace("{cv_text}", cvContent);
+  const systemPrompt = getSystemParsedCvSectionsPrompt();
+  const { object: cvSections } = await generateObject({
+    model: openai("gpt-4o-mini"),
+    system: systemPrompt,
+    prompt: userPrompt,
+    schema: cvSectionSchema,
+  });
+
+  return cvSections;
+};
+
+const metadataInfo = [
+  {
+    name: "category",
+    description: `The category of the document. Can be one of: ['Common Mistakes', 'Tech-Specific', 'Action Verbs', 'Quantification Examples', 'Templates', 'Core Principles']`,
+    type: "string",
+  },
+];

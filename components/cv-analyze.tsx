@@ -15,6 +15,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { JSX } from "react/jsx-runtime"; // Import JSX to resolve undeclared variable error
+import { CVAnalysisResponse } from "@/schema/analyze-cv";
 
 interface Highlight {
   text: string;
@@ -25,12 +26,7 @@ interface Highlight {
 }
 
 interface AnalysisProps {
-  analysis: {
-    overallFeedback: string;
-    score: number;
-    highlights: Highlight[];
-    cvText: string;
-  };
+  analysis: CVAnalysisResponse;
   onReset: () => void;
   fileUrl: string | null;
   jobDescription: string;
@@ -78,48 +74,53 @@ export function CVAnalysis({
   );
   const [pdfError, setPdfError] = useState(false);
 
-  const renderCVWithHighlights = () => {
-    const { cvText, highlights } = analysis;
-    const sortedHighlights = [...highlights].sort(
-      (a, b) => a.startIndex - b.startIndex
-    );
+  // const renderCVWithHighlights = () => {
+  //   const { cvText, highlights } = analysis;
+  //   const sortedHighlights = [...highlights].sort(
+  //     (a, b) => a.startIndex - b.startIndex
+  //   );
 
-    const parts: JSX.Element[] = [];
-    let lastIndex = 0;
+  //   const parts: JSX.Element[] = [];
+  //   let lastIndex = 0;
 
-    sortedHighlights.forEach((highlight, idx) => {
-      if (highlight.startIndex > lastIndex) {
-        parts.push(
-          <span key={`text-${idx}`}>
-            {cvText.slice(lastIndex, highlight.startIndex)}
-          </span>
-        );
-      }
+  //   sortedHighlights.forEach((highlight, idx) => {
+  //     if (highlight.startIndex > lastIndex) {
+  //       parts.push(
+  //         <span key={`text-${idx}`}>
+  //           {cvText.slice(lastIndex, highlight.startIndex)}
+  //         </span>
+  //       );
+  //     }
 
-      const config = categoryConfig[highlight.category];
-      parts.push(
-        <mark
-          key={`highlight-${idx}`}
-          className={cn(
-            "cursor-pointer rounded px-1 transition-all hover:ring-2",
-            config.bgColor,
-            selectedHighlight === highlight && "ring-2 ring-primary"
-          )}
-          onClick={() => setSelectedHighlight(highlight)}
-        >
-          {cvText.slice(highlight.startIndex, highlight.endIndex)}
-        </mark>
-      );
+  //     const config = categoryConfig[highlight.category];
+  //     parts.push(
+  //       <mark
+  //         key={`highlight-${idx}`}
+  //         className={cn(
+  //           "cursor-pointer rounded px-1 transition-all hover:ring-2",
+  //           config.bgColor,
+  //           selectedHighlight === highlight && "ring-2 ring-primary"
+  //         )}
+  //         onClick={() => setSelectedHighlight(highlight)}
+  //       >
+  //         {cvText.slice(highlight.startIndex, highlight.endIndex)}
+  //       </mark>
+  //     );
 
-      lastIndex = highlight.endIndex;
-    });
+  //     lastIndex = highlight.endIndex;
+  //   });
 
-    if (lastIndex < cvText.length) {
-      parts.push(<span key="text-end">{cvText.slice(lastIndex)}</span>);
-    }
+  //   if (lastIndex < cvText.length) {
+  //     parts.push(<span key="text-end">{cvText.slice(lastIndex)}</span>);
+  //   }
 
-    return parts;
-  };
+  //   return parts;
+  // };
+
+  const highlights = Object.values(analysis.sectionAnalysis).flatMap(
+    (section) => section.highlights
+  );
+  console.log("highlights", highlights);
 
   const getScoreColor = (score: number) => {
     if (score >= 80) return "text-green-600";
@@ -221,7 +222,7 @@ export function CVAnalysis({
             <TabsContent value="highlights" className="mt-0">
               <div className="h-[800px] overflow-y-auto rounded-lg border border-border bg-muted/30 p-6">
                 <div className="space-y-4">
-                  {analysis.highlights.map((highlight, idx) => {
+                  {highlights.map((highlight, idx) => {
                     const config = categoryConfig[highlight.category];
                     const Icon = config.icon;
                     return (
@@ -297,7 +298,7 @@ export function CVAnalysis({
             <h3 className="mb-4 text-lg font-semibold">Feedback Summary</h3>
             <div className="space-y-3">
               {Object.entries(categoryConfig).map(([key, config]) => {
-                const count = analysis.highlights.filter(
+                const count = highlights.filter(
                   (h) => h.category === key
                 ).length;
                 const Icon = config.icon;

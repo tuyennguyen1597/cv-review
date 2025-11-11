@@ -7,15 +7,21 @@ const highlightSchema = z.object({
   endIndex: z.number().describe("Character index where highlight ends"),
 });
 
+export const sectionAnalysisSchema = z.object({
+  highlights: z
+    .array(highlightSchema)
+    .describe("Specific sections with feedback"),
+});
+export type SectionAnalysis = z.infer<typeof sectionAnalysisSchema>;
+
 export const analysisSchema = z.object({
   overallFeedback: z
     .string()
     .describe("Comprehensive overall feedback about the CV"),
   score: z.number().min(0).max(100).describe("Overall CV score out of 100"),
-  highlights: z
-    .array(highlightSchema)
-    .describe("Specific sections with feedback"),
-  cvText: z.string().describe("The extracted CV text"),
+  sectionAnalysis: z
+    .record(z.string(), sectionAnalysisSchema)
+    .describe("The analysis of each section"),
 });
 
 export type CVAnalysisResponse = z.infer<typeof analysisSchema>;
