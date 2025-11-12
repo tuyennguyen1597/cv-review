@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { JSX } from "react/jsx-runtime"; // Import JSX to resolve undeclared variable error
 import { CVAnalysisResponse } from "@/schema/analyze-cv";
 
 interface Highlight {
@@ -67,12 +66,13 @@ export function CVAnalysis({
   analysis,
   onReset,
   fileUrl,
-  jobDescription,
+  jobDescription: _jobDescription,
 }: AnalysisProps) {
   const [selectedHighlight, setSelectedHighlight] = useState<Highlight | null>(
     null
   );
   const [pdfError, setPdfError] = useState(false);
+  void _jobDescription;
 
   // const renderCVWithHighlights = () => {
   //   const { cvText, highlights } = analysis;
@@ -192,7 +192,6 @@ export function CVAnalysis({
                       className="h-full w-full"
                       title="CV PDF"
                       onError={() => {
-                        console.log("[v0] PDF iframe failed to load");
                         setPdfError(true);
                       }}
                     />

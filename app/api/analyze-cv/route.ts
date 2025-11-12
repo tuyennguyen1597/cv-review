@@ -4,14 +4,8 @@ import {
   SectionAnalysis,
   sectionAnalysisSchema,
 } from "@/schema/analyze-cv";
-import {
-  getSystemAnalyzeCvPrompt,
-  getSystemFinalScorePrompt,
-} from "@/utils/prompts/system-analyze-cv-prompt";
-import {
-  getUserAnalyzeCvPrompt,
-  getUserParseCvPrompt,
-} from "@/utils/prompts/user-analyze-cv-prompt";
+import { getSystemFinalScorePrompt } from "@/utils/prompts/system-analyze-cv-prompt";
+import { getUserParseCvPrompt } from "@/utils/prompts/user-analyze-cv-prompt";
 import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
 import { SupabaseTranslator } from "@langchain/community/structured_query/supabase";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
@@ -27,6 +21,7 @@ import { buildAnalyzeCvPrompts } from "@/utils/builders/build-prompts";
 export const runtime = "nodejs";
 
 const MAX_CONTEXT_CHARS = 2000;
+const MAX_SECTION_INPUT_CHARS = 2000;
 const RETRIEVER_K = 3;
 const MODEL_CHAT = "gpt-4o-mini";
 const EMBEDDING_MODEL = "text-embedding-3-small";
@@ -82,10 +77,10 @@ export async function POST(req: Request) {
   console.log("Analyzing each section of the CV...");
   const aggregatedAnalysis: Record<string, SectionAnalysis> = {};
   const sectionEntries = Object.entries(CvSections).filter(
-    ([, content]) => content.length >= 50
+    ([, content]) => content && content.length >= 50
   );
   const tasks = sectionEntries.map(async ([section, content]) => {
-    const docs = await retriever.invoke(content);
+    const docs = await retriever.invoke(content ?? "");
     const fullContext = formatDocumentsAsString(docs);
     const contextString =
       fullContext.length > MAX_CONTEXT_CHARS
@@ -94,11 +89,14 @@ export async function POST(req: Request) {
 
     const analysis = await analyzeSectionCv({
       contextString,
-      input: content,
+      input: content ?? "",
       jobDescription,
       section,
     });
-    aggregatedAnalysis[section] = analysis;
+    aggregatedAnalysis[section] = {
+      ...analysis,
+      originalText: content,
+    } as SectionAnalysis;
   });
   await Promise.all(tasks);
 
@@ -108,6 +106,7 @@ export async function POST(req: Request) {
     model: openai(MODEL_CHAT),
     prompt: getSystemFinalScorePrompt(aggregatedAnalysis),
     schema: analysisSchema.pick({ overallFeedback: true, score: true }),
+    temperature: 0.2,
   });
 
   const finalResponse: CVAnalysisResponse = {
@@ -128,6 +127,7 @@ const parseCvToSections = async (cvContent: string): Promise<CvSection> => {
     system: systemPrompt,
     prompt: userPrompt,
     schema: cvSectionSchema,
+    temperature: 0.2,
   });
 
   return cvSections;
@@ -141,17 +141,36 @@ const analyzeSectionCv = async (params: {
 }) => {
   const { systemPrompt, userPrompt } = buildAnalyzeCvPrompts({
     context: params.contextString,
-    input: params.input,
+    input:
+      params.input.length > MAX_SECTION_INPUT_CHARS
+        ? params.input.slice(0, MAX_SECTION_INPUT_CHARS)
+        : params.input,
     jobDescription: params.jobDescription,
     section: params.section,
   });
-  const { object: analysis } = await generateObject({
-    model: openai(MODEL_CHAT),
-    system: systemPrompt,
-    prompt: userPrompt,
-    schema: sectionAnalysisSchema,
-  });
-  return analysis;
+  try {
+    const { object: analysis } = await generateObject({
+      model: openai(MODEL_CHAT),
+      system: systemPrompt,
+      prompt: userPrompt,
+      schema: sectionAnalysisSchema,
+      temperature: 0,
+    });
+    return analysis;
+  } catch (err) {
+    // Retry once with stricter instruction appended to the system prompt
+    const strictSystem = `${systemPrompt}
+    
+    IMPORTANT: Return ONLY a valid JSON object conforming to the schema. No prose.`;
+    const { object: analysis } = await generateObject({
+      model: openai(MODEL_CHAT),
+      system: strictSystem,
+      prompt: userPrompt,
+      schema: sectionAnalysisSchema,
+      temperature: 0,
+    });
+    return analysis;
+  }
 };
 
 const metadataInfo = [

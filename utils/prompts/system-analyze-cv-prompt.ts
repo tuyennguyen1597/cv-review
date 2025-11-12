@@ -9,8 +9,15 @@ export const getSystemAnalyzeCvPrompt =
     - Missing: Important elements that are absent
     - Suggestions: Specific recommendations
     
-    Retrieved Context:
-    {context}`;
+    Output requirements:
+    - Respond ONLY with a valid JSON object that conforms to the expected schema.
+    - Do NOT include any additional prose, explanations, comments, or markdown.
+    - Ensure all string fields contain ONLY section text or feedback, with no embedded objects.
+    
+    Retrieved Context (fenced):
+    \`\`\`text
+    {context}
+    \`\`\``;
 
 export const getSystemFinalScorePrompt = (
   aggregatedAnalysis: Record<string, SectionAnalysis>
