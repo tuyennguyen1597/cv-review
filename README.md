@@ -1,36 +1,171 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## AI-Powered CV Review
 
-## Getting Started
+AI-powered resume analyzer that:
+- Extracts text from a PDF CV
+- Parses it into sections (header, summary, experience, education, skills, projects, other)
+- Retrieves best-practice context from a Supabase pgvector store
+- Uses OpenAI to generate section-level feedback and an overall score
+- Presents interactive feedback and highlights in a polished UI
 
-First, run the development server:
+### Tech stack
+- **Frontend**: Next.js 16 (App Router), React 19, Tailwind CSS 4, Radix UI
+- **AI**: Vercel AI SDK (`ai`, `@ai-sdk/openai`), OpenAI (GPT-4o-mini, embeddings)
+- **RAG**: LangChain, Supabase Vector Store (pgvector)
+- **Parsing**: `pdf-parse` (server), `pdfjs-dist` (utility)
+- **Validation**: `zod`
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+---
+
+### Prerequisites
+- Node.js 18+ (or compatible with Next.js 16)
+- A Supabase project with pgvector enabled
+- An OpenAI API key with access to GPT-4o-mini and `text-embedding-3-small`
+
+---
+
+### Environment variables
+Create `.env.local` in the project root:
+
+```env
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Supabase (server-side only; do NOT expose the service role key to the client)
+NEXT_PUBLIC_SUPABASE_URL=https://<your-project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOi...
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Notes:
+- `SUPABASE_SERVICE_ROLE_KEY` is used only by server-side API routes to write embeddings; keep it secret.
+- The code references a `documents` table and an RPC `match_documents` function in Supabase (see setup below).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Supabase vector store setup (pgvector)
+Enable pgvector and create a minimal documents table and matching function.
 
-## Learn More
+```sql
+-- Enable pgvector
+create extension if not exists vector;
 
-To learn more about Next.js, take a look at the following resources:
+-- Embedding dimension for text-embedding-3-small is 1536
+create table if not exists documents (
+  id bigserial primary key,
+  content text,
+  metadata jsonb,
+  embedding vector(1536)
+);
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+-- Simple RPC to retrieve similar documents
+create or replace function match_documents(
+  query_embedding vector(1536),
+  match_count int,
+  filter jsonb default '{}'::jsonb
+) returns table (
+  id bigint,
+  content text,
+  metadata jsonb,
+  similarity float
+) language plpgsql as $$
+begin
+  return query
+  select d.id,
+         d.content,
+         d.metadata,
+         1 - (d.embedding <=> query_embedding) as similarity
+  from documents d
+  where (filter = '{}'::jsonb or d.metadata @> filter)
+  order by d.embedding <=> query_embedding
+  limit match_count;
+end;
+$$;
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+### Install and run locally
+```bash
+npm install
+npm run dev
+```
+Open `http://localhost:3000`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Scripts:
+- `npm run dev` – start dev server
+- `npm run build` – production build
+- `npm run start` – start production server
+- `npm run lint` – run ESLint
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+### Using the app (UI)
+1. Open the app and upload a PDF CV.
+2. (Optional) Paste a job description to tailor the analysis.
+3. Click “Analyze CV”.
+4. Review:
+   - Overall score (/100) and summary
+   - Section highlights categorized as Strength, Needs Improvement, Missing, Suggestion
+   - Toggle between PDF preview and highlights
+
+Notes:
+- PDFs are parsed on the server using `pdf-parse`.
+- Inputs are trimmed to keep prompts bounded: context and per-section input are limited (~2000 chars).
+
+---
+
+### API reference
+
+#### POST `/api/analyze-cv`
+Analyze a PDF CV and (optionally) a job description.
+
+Request (multipart/form-data):
+- `file`: PDF file (required)
+- `jobDescription`: string (optional)
+
+Example:
+```bash
+curl -X POST http://localhost:3000/api/analyze-cv \
+  -F "file=@/path/to/cv.pdf" \
+  -F "jobDescription=Senior Frontend Engineer JD here..."
+```
+
+Response (200):
+```json
+{
+  "analysis": {
+    "overallFeedback": "string",
+    "score": 0,
+    "sectionAnalysis": {
+      "summary": {
+        "highlights": [
+          {
+            "text": "string",
+            "comment": "string",
+            "category": "strength | improvement | missing | suggestion",
+            "startIndex": 0,
+            "endIndex": 0
+          }
+        ]
+      }
+      /* ... other sections ... */
+    }
+  }
+}
+```
+
+Dependencies and flow:
+- Extract text from PDF (`pdf-parse`)
+- Parse CV into sections via OpenAI (`gpt-4o-mini`) using a JSON schema (`zod`)
+- Retrieve best-practice context from Supabase Vector Store (`match_documents`)
+- Generate structured section analysis with Vercel AI SDK `generateObject` against `zod` schemas
+- Compute final score/feedback with a separate model call
+
+### Project structure (high-level)
+- `app/` – Next.js App Router, UI, and API routes
+  - `api/analyze-cv` – main analysis endpoint
+  - `api/ingest` and `api/ingest/text` – ingest helpers for the RAG store
+- `components/` – UI components (`cv-upload`, `cv-analyze`, shadcn-style UI)
+- `schema/` – `zod` schemas for model-aligned JSON
+- `utils/` – prompt builders and system/user prompts
+- `lib/` – utilities (e.g., PDF parsing helper)
+
